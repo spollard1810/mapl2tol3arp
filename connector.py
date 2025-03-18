@@ -224,13 +224,15 @@ class NetworkConnector:
                         # Clean and normalize MAC address
                         mac = mac.lower()  # Convert to lowercase
                         
-                        # Store MAC with port info and device hostname
-                        mac_addresses[mac] = {
-                            'port': port or 'unknown',
-                            'device': hostname,
-                            'vlan': vlan or 'unknown'
-                        }
-                        logger.debug(f"Added MAC address: {mac} on port {port} of device {hostname}")
+                        # Only store/update if we don't have this MAC yet or if we have a valid port
+                        # This ensures we keep the first (L2) port we find and don't overwrite with L3 interface
+                        if mac not in mac_addresses or (port and port != 'unknown'):
+                            mac_addresses[mac] = {
+                                'port': port or 'unknown',
+                                'device': hostname,
+                                'vlan': vlan or 'unknown'
+                            }
+                            logger.debug(f"Added/Updated MAC address: {mac} on port {port} of device {hostname}")
                 except Exception as e:
                     logger.error(f"Error processing MAC entry: {str(e)}, Entry: {entry}")
                     
@@ -342,11 +344,12 @@ class NetworkConnector:
                         for stored_mac in mac_addresses.keys():
                             normalized_stored = stored_mac.replace(':', '').replace('.', '')
                             if mac_address == stored_mac or normalized_mac == normalized_stored:
-                                # Store the IP along with port info
+                                # Get the existing L2 information
                                 mac_info = mac_addresses[stored_mac].copy()
+                                # Add the IP address but preserve the original L2 port info
                                 mac_info['ip'] = ip_address
                                 mac_to_ip[stored_mac] = mac_info
-                                logger.info(f"Mapped MAC {stored_mac} to IP {ip_address} on port {mac_info['port']}")
+                                logger.info(f"Mapped MAC {stored_mac} to IP {ip_address} (L2 port: {mac_info['port']})")
                                 matched = True
                                 break
                         

@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 class NetworkConnector:
     """Class to handle network device connections and command execution."""
     
-    def __init__(self, username, password, templates_dir='templates', device_type='cisco_nxos'):
+    def __init__(self, username, password, templates_dir='templates', device_type='cisco_nxos', vxlan=False):
         """Initialize the connector with login credentials."""
         self.username = username
         self.password = password
         self.device_type = device_type
         self.templates_dir = templates_dir
+        self.vxlan = vxlan
         self.mac_addresses = {}  # Changed from set to dict to store {mac: {'port': port, 'device': device}}
         self.connections = {}
         
@@ -132,18 +133,26 @@ class NetworkConnector:
         return []
     
     def get_mac_address_table(self, connection):
-        """Try different variants of the show mac address-table command based on device type."""
-        # List of potential command variants for different Cisco platforms, including NX-OS
-        mac_commands = [
-            "show mac address-table",
-            "show mac-address-table",
-            "show mac addr",
-            "show mac address-table dynamic",
-            # NX-OS specific commands
-            "show mac address-table vlan 1",
-            "show mac address",
-            "show mac"
-        ]
+        """Try different variants of the show mac address-table command based on device type and VXLAN mode."""
+        if self.vxlan:
+            # VXLAN-specific commands for EVPN
+            mac_commands = [
+                "show mac address-table vlan all",
+                "show mac address-table vlan 1",
+                "show mac address-table",
+                "show mac address"
+            ]
+        else:
+            # Standard commands for non-VXLAN
+            mac_commands = [
+                "show mac address-table",
+                "show mac-address-table",
+                "show mac addr",
+                "show mac address-table dynamic",
+                "show mac address-table vlan 1",
+                "show mac address",
+                "show mac"
+            ]
         
         for command in mac_commands:
             try:
@@ -155,7 +164,6 @@ class NetworkConnector:
                     f.write(output)
                 
                 # Check if the output looks like a MAC address table
-                # For NX-OS, we need different detection criteria
                 if (len(output) > 100 and 
                     ("mac" in output.lower() or "address" in output.lower() or "vlan" in output.lower())):
                     logger.info(f"Successfully executed command: {command}")
@@ -167,6 +175,66 @@ class NetworkConnector:
         logger.error("Could not retrieve MAC address table with any command variant")
         return ""
     
+    def get_evpn_mac_ip_bindings(self, connection):
+        """Get MAC-to-IP bindings from EVPN for VXLAN environments."""
+        evpn_commands = [
+            "show bgp l2vpn evpn",
+            "show bgp l2vpn evpn | grep -i mac",
+            "show bgp l2vpn evpn mac",
+            "show bgp l2vpn evpn mac-ip"
+        ]
+        
+        for command in evpn_commands:
+            try:
+                logger.info(f"Trying EVPN command: {command}")
+                output = self.execute_command(connection, command)
+                
+                # Dump the output to a file for debugging
+                with open(f"evpn_output_{time.strftime('%Y%m%d_%H%M%S')}.txt", "w") as f:
+                    f.write(output)
+                
+                if len(output) > 100 and any(term in output.lower() 
+                                           for term in ["mac", "evpn", "bgp"]):
+                    logger.info(f"Successfully executed EVPN command: {command}")
+                    return output
+            except Exception as e:
+                logger.warning(f"Error with EVPN command {command}: {str(e)}")
+                continue
+        
+        logger.error("Could not retrieve EVPN MAC-IP bindings")
+        return ""
+
+    def parse_evpn_output(self, output):
+        """Parse EVPN output to extract MAC-to-IP bindings."""
+        bindings = {}
+        
+        # Basic parsing of EVPN output
+        for line in output.splitlines():
+            # Look for lines containing MAC and IP information
+            if "mac-ip" in line.lower() or "mac" in line.lower():
+                parts = line.split()
+                for i, part in enumerate(parts):
+                    # Look for MAC address format
+                    if ':' in part or '.' in part:
+                        mac = part.lower()
+                        # Look for IP address in nearby fields
+                        for j in range(max(0, i-3), min(len(parts), i+4)):
+                            if self.is_valid_ip(parts[j]):
+                                ip = parts[j]
+                                bindings[mac] = ip
+                                logger.debug(f"Found EVPN binding: MAC {mac} -> IP {ip}")
+                                break
+        
+        return bindings
+
+    def is_valid_ip(self, ip_str):
+        """Check if a string is a valid IP address."""
+        try:
+            parts = ip_str.split('.')
+            return len(parts) == 4 and all(0 <= int(part) <= 255 for part in parts)
+        except (AttributeError, TypeError, ValueError):
+            return False
+
     def collect_mac_addresses(self, hostnames):
         """Connect to L2 devices and collect MAC address table information."""
         mac_addresses = {}  # Changed from set to dict to store port and device info
@@ -287,81 +355,113 @@ class NetworkConnector:
         return ""
     
     def map_mac_to_ip(self, hostnames, mac_addresses):
-        """Connect to L3 devices and map MAC addresses to IP addresses from ARP tables."""
+        """Connect to L3 devices and map MAC addresses to IP addresses."""
         mac_to_ip = {}
         
-        for hostname in hostnames:
-            connection = self.connect(hostname)
-            if not connection:
-                continue
+        if self.vxlan:
+            # VXLAN mode: Use EVPN for MAC-to-IP mapping
+            for hostname in hostnames:
+                connection = self.connect(hostname)
+                if not connection:
+                    continue
                 
-            # Use the helper method to get ARP table
-            output = self.get_arp_table(connection)
-            
-            if not output:
-                logger.error(f"Failed to get ARP table from {hostname}")
-                continue
+                # Get EVPN MAC-IP bindings
+                output = self.get_evpn_mac_ip_bindings(connection)
+                if not output:
+                    logger.error(f"Failed to get EVPN bindings from {hostname}")
+                    continue
                 
-            # Parse the output using TextFSM
-            parsed_data = self.parse_with_textfsm(output, "cisco_ios_show_ip_arp.textfsm")
-            
-            if not parsed_data:
-                logger.error(f"Failed to parse ARP table from {hostname}")
-                continue
+                # Parse EVPN output
+                evpn_bindings = self.parse_evpn_output(output)
                 
-            logger.info(f"Successfully parsed {len(parsed_data)} ARP entries from {hostname}")
-                
-            # Match MAC addresses to IP addresses using updated field names
-            for entry in parsed_data:
-                try:
-                    # Handle potential different formats from the template
-                    ip_address = None
-                    mac_address = None
+                # Match MAC addresses to IP addresses from EVPN
+                for mac, ip in evpn_bindings.items():
+                    # Normalize MAC address format
+                    normalized_mac = mac.replace(':', '').replace('.', '')
                     
-                    # The entry should be a list with at least the IP and MAC values
-                    if len(entry) >= 3:
-                        ip_address = entry[0]  # IP_ADDRESS is first
+                    # Check both raw and normalized MAC formats
+                    for stored_mac in mac_addresses.keys():
+                        normalized_stored = stored_mac.replace(':', '').replace('.', '')
+                        if mac == stored_mac or normalized_mac == normalized_stored:
+                            # Get the existing L2 information
+                            mac_info = mac_addresses[stored_mac].copy()
+                            # Add the IP address but preserve the original L2 port info
+                            mac_info['ip'] = ip
+                            mac_to_ip[stored_mac] = mac_info
+                            logger.info(f"Mapped MAC {stored_mac} to IP {ip} via EVPN (L2 port: {mac_info['port']})")
+                            break
+                
+                connection.disconnect()
+        else:
+            # Standard mode: Use ARP table for MAC-to-IP mapping
+            for hostname in hostnames:
+                connection = self.connect(hostname)
+                if not connection:
+                    continue
+                    
+                # Use the helper method to get ARP table
+                output = self.get_arp_table(connection)
+                
+                if not output:
+                    logger.error(f"Failed to get ARP table from {hostname}")
+                    continue
+                    
+                # Parse the output using TextFSM
+                parsed_data = self.parse_with_textfsm(output, "cisco_ios_show_ip_arp.textfsm")
+                
+                if not parsed_data:
+                    logger.error(f"Failed to parse ARP table from {hostname}")
+                    continue
+                    
+                logger.info(f"Successfully parsed {len(parsed_data)} ARP entries from {hostname}")
+                    
+                # Match MAC addresses to IP addresses using updated field names
+                for entry in parsed_data:
+                    try:
+                        # Handle potential different formats from the template
+                        ip_address = None
+                        mac_address = None
                         
-                        # Try to identify which field is the MAC address
-                        mac_field = entry[2]  # Normally the third field is MAC_ADDRESS
-                        
-                        # Check if it looks like a MAC (contains : or .)
-                        if ':' in mac_field or '.' in mac_field:
-                            mac_address = mac_field.lower()
-                        else:
-                            # If not, try the second field
-                            mac_field = entry[1]
+                        # The entry should be a list with at least the IP and MAC values
+                        if len(entry) >= 3:
+                            ip_address = entry[0]  # IP_ADDRESS is first
+                            
+                            # Try to identify which field is the MAC address
+                            mac_field = entry[2]  # Normally the third field is MAC_ADDRESS
+                            
+                            # Check if it looks like a MAC (contains : or .)
                             if ':' in mac_field or '.' in mac_field:
                                 mac_address = mac_field.lower()
-                    
-                    if ip_address and mac_address:
-                        # Normalize MAC address format (remove colons/dots if present)
-                        # This helps with matching regardless of format differences
-                        normalized_mac = mac_address.replace(':', '').replace('.', '')
+                            else:
+                                # If not, try the second field
+                                mac_field = entry[1]
+                                if ':' in mac_field or '.' in mac_field:
+                                    mac_address = mac_field.lower()
                         
-                        # Check both the raw MAC and normalized format
-                        matched = False
-                        for stored_mac in mac_addresses.keys():
-                            normalized_stored = stored_mac.replace(':', '').replace('.', '')
-                            if mac_address == stored_mac or normalized_mac == normalized_stored:
-                                # Get the existing L2 information
-                                mac_info = mac_addresses[stored_mac].copy()
-                                # Add the IP address but preserve the original L2 port info
-                                mac_info['ip'] = ip_address
-                                mac_to_ip[stored_mac] = mac_info
-                                logger.info(f"Mapped MAC {stored_mac} to IP {ip_address} (L2 port: {mac_info['port']})")
-                                matched = True
-                                break
-                        
-                        if not matched:
-                            logger.debug(f"MAC {mac_address} not found in collected L2 MAC addresses")
-                    else:
-                        logger.warning(f"Could not extract valid IP or MAC from entry: {entry}")
-                        
-                except Exception as e:
-                    logger.error(f"Error processing ARP entry: {str(e)}, Entry: {entry}")
-        
-        # Disconnect from all devices
-        self.disconnect_all()
+                        if ip_address and mac_address:
+                            # Normalize MAC address format (remove colons/dots if present)
+                            normalized_mac = mac_address.replace(':', '').replace('.', '')
+                            
+                            # Check both the raw MAC and normalized format
+                            matched = False
+                            for stored_mac in mac_addresses.keys():
+                                normalized_stored = stored_mac.replace(':', '').replace('.', '')
+                                if mac_address == stored_mac or normalized_mac == normalized_stored:
+                                    # Get the existing L2 information
+                                    mac_info = mac_addresses[stored_mac].copy()
+                                    # Add the IP address but preserve the original L2 port info
+                                    mac_info['ip'] = ip_address
+                                    mac_to_ip[stored_mac] = mac_info
+                                    logger.info(f"Mapped MAC {stored_mac} to IP {ip_address} (L2 port: {mac_info['port']})")
+                                    matched = True
+                                    break
+                            
+                            if not matched:
+                                logger.debug(f"MAC {mac_address} not found in collected L2 MAC addresses")
+                        else:
+                            logger.warning(f"Could not extract valid IP or MAC from entry: {entry}")
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing ARP entry: {str(e)}, Entry: {entry}")
         
         return mac_to_ip 

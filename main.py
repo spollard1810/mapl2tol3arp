@@ -24,37 +24,14 @@ logger = logging.getLogger(__name__)
 
 def parse_arguments():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Network device MAC to IP mapping tool')
-    parser.add_argument(
-        '--hostnames', 
-        type=str, 
-        default='hostnames.txt',
-        help='File containing hostnames of L2 devices'
-    )
-    parser.add_argument(
-        '--upstream', 
-        type=str, 
-        default='upstream.txt',
-        help='File containing hostnames of upstream L3 devices'
-    )
-    parser.add_argument(
-        '--credentials', 
-        type=str, 
-        default='credentials.txt',
-        help='File containing login credentials'
-    )
-    parser.add_argument(
-        '--templates', 
-        type=str, 
-        default='templates',
-        help='Directory containing TextFSM templates'
-    )
-    parser.add_argument(
-        '--output', 
-        type=str, 
-        default='output.csv',
-        help='Output CSV file'
-    )
+    parser = argparse.ArgumentParser(description='Map MAC addresses to IP addresses across network devices.')
+    parser.add_argument('--hostnames', required=True, help='File containing list of L2 device hostnames')
+    parser.add_argument('--upstream', required=True, help='File containing list of L3 device hostnames')
+    parser.add_argument('--credentials', required=True, help='File containing device credentials')
+    parser.add_argument('--templates', default='templates', help='Directory containing TextFSM templates')
+    parser.add_argument('--output', default='output.csv', help='Output CSV file path')
+    parser.add_argument('--vxlan', action='store_true', help='Enable VXLAN mode for EVPN-based MAC-to-IP mapping')
+    
     return parser.parse_args()
 
 def read_device_list(filename):
@@ -156,23 +133,25 @@ def main():
         logger.error("No valid credentials found. Exiting.")
         return
     
-    # Initialize network connector
+    # Initialize network connector with VXLAN mode if specified
     connector = NetworkConnector(
         username=credentials.get('username'),
         password=credentials.get('password'),
-        templates_dir=args.templates
+        templates_dir=args.templates,
+        vxlan=args.vxlan
     )
     
     # Step 1: Connect to L2 devices and get MAC addresses
     mac_addresses = connector.collect_mac_addresses(l2_devices)
     logger.info(f"Collected {len(mac_addresses)} MAC addresses from L2 devices")
     
-    # Step 2: Connect to L3 devices and get ARP tables
+    # Step 2: Connect to L3 devices and get MAC-to-IP mappings
+    # In VXLAN mode, this will use EVPN instead of ARP
     mac_to_ip = connector.map_mac_to_ip(l3_devices, mac_addresses)
     logger.info(f"Mapped {len(mac_to_ip)} MAC addresses to IP addresses")
     
     # Step 3: Perform DNS lookups
-    # Extract IP addresses from the mac_to_ip dictionary (now contains objects, not just strings)
+    # Extract IP addresses from the mac_to_ip dictionary
     ip_addresses = [info['ip'] for info in mac_to_ip.values()]
     dns_results = perform_dns_lookups(ip_addresses)
     write_hosts_file(dns_results)

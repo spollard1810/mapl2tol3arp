@@ -1,2 +1,2 @@
-netmiko>=4.1.0
+netmiko>=4.2.0
 textfsm>=1.1.2 

@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from netmiko import ConnectHandler
-from netmiko.ssh_exception import NetMikoTimeoutException, NetMikoAuthenticationException
+from netmiko.exceptions import NetMikoTimeoutException, NetMikoAuthenticationException
 import textfsm
 from pathlib import Path
 
@@ -108,12 +108,12 @@ class NetworkConnector:
             # Parse the output using TextFSM
             parsed_data = self.parse_with_textfsm(output, "cisco_ios_show_mac_address_table.textfsm")
             
-            # Extract MAC addresses
+            # Extract MAC addresses - using the updated field name DESTINATION_ADDRESS
             for entry in parsed_data:
-                # Typically, MAC address would be in a specific index of the parsed result
-                # Adjust the index based on your TextFSM template
-                if len(entry) >= 2:  # Assuming MAC address is the second field
-                    mac_addresses.add(entry[1].lower())  # Normalize MAC address format
+                # Get the MAC address using the updated field name
+                mac = entry[0]  # DESTINATION_ADDRESS is the first field in the updated template
+                if mac:
+                    mac_addresses.add(mac.lower())  # Normalize MAC address format
                     
         # Disconnect from all devices
         self.disconnect_all()
@@ -145,13 +145,12 @@ class NetworkConnector:
             # Parse the output using TextFSM
             parsed_data = self.parse_with_textfsm(output, "cisco_ios_show_ip_arp.textfsm")
             
-            # Match MAC addresses to IP addresses
+            # Match MAC addresses to IP addresses using updated field names
             for entry in parsed_data:
-                # Adjust indices based on your TextFSM template
-                # Typically, IP is at index 0 and MAC is at index 2
-                if len(entry) >= 3:
-                    ip = entry[0]
-                    mac = entry[2].lower()  # Normalize MAC address format
+                # Using the updated field names - IP_ADDRESS and MAC_ADDRESS
+                if len(entry) >= 4:  # Ensure we have enough elements
+                    ip = entry[1]     # IP_ADDRESS is the second field in the updated template
+                    mac = entry[3].lower()  # MAC_ADDRESS is the fourth field, normalize to lowercase
                     
                     if mac in mac_addresses and mac not in mac_to_ip:
                         mac_to_ip[mac] = ip

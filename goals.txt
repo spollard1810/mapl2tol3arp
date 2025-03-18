@@ -1,0 +1,44 @@
+Goals 
+TEXTFSM templates 
+Connect using netmiko 
+All CLI based
+login credentials in credentials.txt
+Current script:
+Connect to hostnames via hostnames.txt for line in line
+Use netmiko to handle each
+‘Sh MAC address table’
+Use textfsm to parse
+Save all MAC addresses to file/objects
+
+2nd part: connect to devices via upstream.txt
+Map the MAC addresses to arp table to get its
+
+3rd part:
+Nslookup each ip and return the entry into hosts.txt
+
+4th part:
+Parse hosts.txt and create a csv with the following columns:
+Hostname, IP, MAC
+
+
+
+Main.py
+- Main entry point
+- Calls functions 
+- Handles cli input and args
+Connector.py
+- Handles connections from netmiko
+
+Flow of script
+Login to devices in upstream.txt
+Pull all MAC addresses sitting on devices
+Save them
+Close connections
+Login to  the upstream l3 devices.
+Get arp table
+Match the MAC addresses 
+Save the ips of the matched 
+Do dns lookup on all matched ips
+Output the lookups to textile hosts.txt
+
+textFSM templates stored in /templates

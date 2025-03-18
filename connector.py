@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class NetworkConnector:
     """Class to handle network device connections and command execution."""
     
-    def __init__(self, username, password, templates_dir='templates', device_type='cisco_ios'):
+    def __init__(self, username, password, templates_dir='templates', device_type='cisco_nxos'):
         """Initialize the connector with login credentials."""
         self.username = username
         self.password = password
@@ -102,26 +102,47 @@ class NetworkConnector:
         template_path = os.path.join(self.templates_dir, template_name)
         
         try:
+            # Save the raw output for debugging
+            debug_filename = f"raw_output_{template_name.replace('.textfsm', '')}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+            with open(debug_filename, 'w') as f:
+                f.write(text_data)
+            logger.info(f"Saved raw output to {debug_filename}")
+            
             with open(template_path, 'r') as template_file:
                 template = textfsm.TextFSM(template_file)
+                
+                # Log template value names for debugging
+                logger.info(f"Template values: {[val.name for val in template.values]}")
+                
                 result = template.ParseText(text_data)
-                logger.info(f"Successfully parsed data with template: {template_name}")
+                
+                # Log the first few parsed results for debugging
+                if result:
+                    sample = result[:min(5, len(result))]
+                    logger.info(f"Sample of parsed data (first {len(sample)} entries): {sample}")
+                
+                logger.info(f"Successfully parsed {len(result)} entries with template: {template_name}")
                 return result
         except FileNotFoundError:
             logger.error(f"Template file not found: {template_path}")
         except Exception as e:
             logger.error(f"Error parsing with TextFSM: {str(e)}")
+            logger.error(f"Template path: {template_path}")
             
         return []
     
     def get_mac_address_table(self, connection):
         """Try different variants of the show mac address-table command based on device type."""
-        # List of potential command variants for different Cisco platforms
+        # List of potential command variants for different Cisco platforms, including NX-OS
         mac_commands = [
             "show mac address-table",
             "show mac-address-table",
             "show mac addr",
-            "show mac address-table dynamic"
+            "show mac address-table dynamic",
+            # NX-OS specific commands
+            "show mac address-table vlan 1",
+            "show mac address",
+            "show mac"
         ]
         
         for command in mac_commands:
@@ -129,8 +150,14 @@ class NetworkConnector:
                 logger.info(f"Trying command: {command}")
                 output = self.execute_command(connection, command)
                 
+                # Dump the output to a file for debugging
+                with open(f"mac_output_{time.strftime('%Y%m%d_%H%M%S')}.txt", "w") as f:
+                    f.write(output)
+                
                 # Check if the output looks like a MAC address table
-                if "mac" in output.lower() and "address" in output.lower() and len(output) > 100:
+                # For NX-OS, we need different detection criteria
+                if (len(output) > 100 and 
+                    ("mac" in output.lower() or "address" in output.lower() or "vlan" in output.lower())):
                     logger.info(f"Successfully executed command: {command}")
                     return output
             except Exception as e:
@@ -159,12 +186,20 @@ class NetworkConnector:
             # Parse the output using TextFSM
             parsed_data = self.parse_with_textfsm(output, "cisco_ios_show_mac_address_table.textfsm")
             
-            # Extract MAC addresses - using the updated field name DESTINATION_ADDRESS
+            logger.info(f"Parsed {len(parsed_data)} MAC address entries from {hostname}")
+            
+            # Extract MAC addresses using the updated field names from the template
             for entry in parsed_data:
-                # Get the MAC address using the updated field name
-                mac = entry[0]  # DESTINATION_ADDRESS is the first field in the updated template
-                if mac:
-                    mac_addresses.add(mac.lower())  # Normalize MAC address format
+                try:
+                    # Access MAC_ADDRESS which is the second field (index 1) in the new template
+                    if len(entry) >= 7:  # Ensure we have all fields from the template
+                        # Template order: VLAN_ID, MAC_ADDRESS, TYPE, AGE, SECURE, NTFY, PORTS
+                        mac = entry[1]  # MAC_ADDRESS is now the second field
+                        if mac:
+                            logger.debug(f"Found MAC address: {mac}")
+                            mac_addresses.add(mac.lower())  # Normalize MAC address format
+                except Exception as e:
+                    logger.error(f"Error processing MAC entry: {str(e)}, Entry: {entry}")
                     
         # Disconnect from all devices
         self.disconnect_all()
@@ -182,12 +217,16 @@ class NetworkConnector:
         logger.info(f"Saved {len(mac_addresses)} MAC addresses to {filename}")
     
     def get_arp_table(self, connection):
-        """Try different variants of the show ip arp command."""
-        # List of potential command variants
+        """Try different variants of the show ip arp command for NX-OS."""
+        # List of potential command variants, including NX-OS specific ones
         arp_commands = [
             "show ip arp",
             "show arp",
-            "show ip arp | exclude Incomplete"
+            "show ip arp | exclude Incomplete",
+            # NX-OS specific commands
+            "show ip arp vrf all",
+            "show ip arp detail",
+            "show arp"
         ]
         
         for command in arp_commands:
@@ -195,8 +234,14 @@ class NetworkConnector:
                 logger.info(f"Trying command: {command}")
                 output = self.execute_command(connection, command)
                 
+                # Dump the output to a file for debugging
+                with open(f"arp_output_{time.strftime('%Y%m%d_%H%M%S')}.txt", "w") as f:
+                    f.write(output)
+                
                 # Check if the output looks like an ARP table
-                if "ip" in output.lower() and "address" in output.lower() and len(output) > 100:
+                # Adjust criteria for NX-OS
+                if len(output) > 100 and any(term in output.lower() 
+                                           for term in ["ip", "address", "mac", "age", "interface"]):
                     logger.info(f"Successfully executed command: {command}")
                     return output
             except Exception as e:
@@ -234,10 +279,10 @@ class NetworkConnector:
             # Match MAC addresses to IP addresses using updated field names
             for entry in parsed_data:
                 try:
-                    # Using the updated field names - IP_ADDRESS and MAC_ADDRESS
-                    if len(entry) >= 4:  # Ensure we have enough elements
-                        ip = entry[1]     # IP_ADDRESS is the second field in the updated template
-                        mac = entry[3].lower()  # MAC_ADDRESS is the fourth field, normalize to lowercase
+                    if len(entry) >= 3:  # Ensure we have enough elements
+                        # Template order: IP_ADDRESS, AGE, MAC_ADDRESS, INTERFACE
+                        ip = entry[0]     # IP_ADDRESS is the first field
+                        mac = entry[2].lower()  # MAC_ADDRESS is the third field, normalize to lowercase
                         
                         if mac in mac_addresses and mac not in mac_to_ip:
                             mac_to_ip[mac] = ip

@@ -191,13 +191,31 @@ class NetworkConnector:
             # Extract MAC addresses using the updated field names from the template
             for entry in parsed_data:
                 try:
-                    # Access MAC_ADDRESS which is the second field (index 1) in the new template
-                    if len(entry) >= 7:  # Ensure we have all fields from the template
-                        # Template order: VLAN_ID, MAC_ADDRESS, TYPE, AGE, SECURE, NTFY, PORTS
-                        mac = entry[1]  # MAC_ADDRESS is now the second field
-                        if mac:
-                            logger.debug(f"Found MAC address: {mac}")
-                            mac_addresses.add(mac.lower())  # Normalize MAC address format
+                    # Handle both old and new template formats
+                    mac = None
+                    
+                    # Determine which field contains the MAC address
+                    for i, field in enumerate(entry):
+                        # MAC addresses typically contain : or . as separators
+                        if field and (':' in field or '.' in field or 
+                                     (len(field) in [12, 14, 17] and all(c in '0123456789abcdefABCDEF.:' for c in field))):
+                            mac = field
+                            logger.debug(f"Found MAC address at index {i}: {mac}")
+                            break
+                    
+                    # If no field looks like a MAC, try the fields we expect based on template
+                    if not mac and len(entry) >= 7:  # For VLAN_ID, MAC_ADDRESS, TYPE, AGE, SECURE, NTFY, PORTS
+                        mac = entry[1]  # MAC_ADDRESS is second field in new template
+                    elif not mac and len(entry) >= 2:  # For older template
+                        mac = entry[1]  # MAC field in older template
+                        
+                    if mac:
+                        # Clean and normalize MAC address
+                        mac = mac.lower()  # Convert to lowercase
+                        
+                        # Add to the set
+                        mac_addresses.add(mac)
+                        logger.debug(f"Added MAC address: {mac}")
                 except Exception as e:
                     logger.error(f"Error processing MAC entry: {str(e)}, Entry: {entry}")
                     
@@ -279,14 +297,46 @@ class NetworkConnector:
             # Match MAC addresses to IP addresses using updated field names
             for entry in parsed_data:
                 try:
-                    if len(entry) >= 3:  # Ensure we have enough elements
-                        # Template order: IP_ADDRESS, AGE, MAC_ADDRESS, INTERFACE
-                        ip = entry[0]     # IP_ADDRESS is the first field
-                        mac = entry[2].lower()  # MAC_ADDRESS is the third field, normalize to lowercase
+                    # Handle potential different formats from the template
+                    ip_address = None
+                    mac_address = None
+                    
+                    # The entry should be a list with at least the IP and MAC values
+                    if len(entry) >= 3:
+                        ip_address = entry[0]  # IP_ADDRESS is first
                         
-                        if mac in mac_addresses and mac not in mac_to_ip:
-                            mac_to_ip[mac] = ip
-                            logger.info(f"Mapped MAC {mac} to IP {ip}")
+                        # Try to identify which field is the MAC address
+                        mac_field = entry[2]  # Normally the third field is MAC_ADDRESS
+                        
+                        # Check if it looks like a MAC (contains : or .)
+                        if ':' in mac_field or '.' in mac_field:
+                            mac_address = mac_field.lower()
+                        else:
+                            # If not, try the second field
+                            mac_field = entry[1]
+                            if ':' in mac_field or '.' in mac_field:
+                                mac_address = mac_field.lower()
+                    
+                    if ip_address and mac_address:
+                        # Normalize MAC address format (remove colons/dots if present)
+                        # This helps with matching regardless of format differences
+                        normalized_mac = mac_address.replace(':', '').replace('.', '')
+                        
+                        # Check both the raw MAC and normalized format
+                        matched = False
+                        for stored_mac in mac_addresses:
+                            normalized_stored = stored_mac.replace(':', '').replace('.', '')
+                            if mac_address == stored_mac or normalized_mac == normalized_stored:
+                                mac_to_ip[stored_mac] = ip_address
+                                logger.info(f"Mapped MAC {stored_mac} to IP {ip_address}")
+                                matched = True
+                                break
+                        
+                        if not matched:
+                            logger.debug(f"MAC {mac_address} not found in collected L2 MAC addresses")
+                    else:
+                        logger.warning(f"Could not extract valid IP or MAC from entry: {entry}")
+                        
                 except Exception as e:
                     logger.error(f"Error processing ARP entry: {str(e)}, Entry: {entry}")
         

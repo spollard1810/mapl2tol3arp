@@ -1,13 +1,28 @@
-Value Required IP_ADDRESS (\d+\.\d+\.\d+\.\d+)
-Value Required AGE (\S+)
-Value Required MAC_ADDRESS (\S+)
+Value IP_ADDRESS (\d+\.\d+\.\d+\.\d+)
+Value AGE ([\w\d\-:]+)
+Value MAC_ADDRESS ([0-9a-fA-F.]{14}|[0-9a-fA-F:]{17})
 Value INTERFACE (\S+)
+Value FLAGS (\S+)
 
 Start
-  ^Address\s+Age\s+MAC Address\s+Interface -> Start_record
+  # Standard format for "show ip arp"
+  ^Address\s+Age\s+MAC Address\s+Interface -> Standard
+  # NX-OS Format
+  ^IP ARP Table -> NXOS
+  # Direct format without header
+  ^${IP_ADDRESS}\s+${AGE}\s+${MAC_ADDRESS}(\s+${FLAGS})?(\s+${INTERFACE})? -> Record
+  ^${IP_ADDRESS}\s+${MAC_ADDRESS}\s+${AGE}(\s+${FLAGS})?(\s+${INTERFACE})? -> Record
 
-Start_record
+Standard
   ^${IP_ADDRESS}\s+${AGE}\s+${MAC_ADDRESS}\s+${INTERFACE} -> Record
   ^\s+$$
   ^$$
-  ^.* -> Error "LINE NOT FOUND"
+  # Skip lines that don't match
+  ^.+ -> Continue
+
+NXOS
+  # NX-OS specific "show ip arp" format with different column ordering
+  ^${IP_ADDRESS}\s+${AGE}\s+${MAC_ADDRESS}(\s+${FLAGS})?(\s+${INTERFACE})? -> Record
+  ^${IP_ADDRESS}\s+${MAC_ADDRESS}\s+${AGE}(\s+${FLAGS})?(\s+${INTERFACE})? -> Record
+  # Skip lines that don't match
+  ^.+ -> Continue

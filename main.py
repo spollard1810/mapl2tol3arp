@@ -105,12 +105,15 @@ def write_csv_results(results, filename='output.csv'):
     """Write results to CSV file."""
     with open(filename, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Hostname', 'IP', 'MAC'])
+        writer.writerow(['Hostname', 'IP', 'MAC', 'Switch', 'Port', 'VLAN'])
         for entry in results:
             writer.writerow([
                 entry.get('hostname', ''),
                 entry.get('ip', ''),
-                entry.get('mac', '')
+                entry.get('mac', ''),
+                entry.get('device', ''),
+                entry.get('port', ''),
+                entry.get('vlan', '')
             ])
     logger.info(f"Results written to {filename}")
 
@@ -169,18 +172,27 @@ def main():
     logger.info(f"Mapped {len(mac_to_ip)} MAC addresses to IP addresses")
     
     # Step 3: Perform DNS lookups
-    dns_results = perform_dns_lookups(mac_to_ip.values())
+    # Extract IP addresses from the mac_to_ip dictionary (now contains objects, not just strings)
+    ip_addresses = [info['ip'] for info in mac_to_ip.values()]
+    dns_results = perform_dns_lookups(ip_addresses)
     write_hosts_file(dns_results)
     
     # Step 4: Create final CSV output
     results = []
-    for mac, ip in mac_to_ip.items():
+    for mac, info in mac_to_ip.items():
+        ip = info['ip']
         hostname = dns_results.get(ip, '')
-        results.append({
+        
+        # Create result entry with switch port information
+        result = {
             'hostname': hostname,
             'ip': ip,
-            'mac': mac
-        })
+            'mac': mac,
+            'device': info.get('device', ''),
+            'port': info.get('port', ''),
+            'vlan': info.get('vlan', '')
+        }
+        results.append(result)
     
     write_csv_results(results, args.output)
     logger.info(f"Process completed. Results saved to {args.output}")

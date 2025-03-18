@@ -25,7 +25,7 @@ class NetworkConnector:
         self.password = password
         self.device_type = device_type
         self.templates_dir = templates_dir
-        self.mac_addresses = set()
+        self.mac_addresses = {}  # Changed from set to dict to store {mac: {'port': port, 'device': device}}
         self.connections = {}
         
     def connect(self, hostname):
@@ -169,7 +169,7 @@ class NetworkConnector:
     
     def collect_mac_addresses(self, hostnames):
         """Connect to L2 devices and collect MAC address table information."""
-        mac_addresses = set()
+        mac_addresses = {}  # Changed from set to dict to store port and device info
         
         for hostname in hostnames:
             connection = self.connect(hostname)
@@ -188,34 +188,49 @@ class NetworkConnector:
             
             logger.info(f"Parsed {len(parsed_data)} MAC address entries from {hostname}")
             
-            # Extract MAC addresses using the updated field names from the template
+            # Extract MAC addresses and port information
             for entry in parsed_data:
                 try:
                     # Handle both old and new template formats
                     mac = None
+                    port = None
+                    vlan = None
                     
-                    # Determine which field contains the MAC address
-                    for i, field in enumerate(entry):
-                        # MAC addresses typically contain : or . as separators
-                        if field and (':' in field or '.' in field or 
-                                     (len(field) in [12, 14, 17] and all(c in '0123456789abcdefABCDEF.:' for c in field))):
-                            mac = field
-                            logger.debug(f"Found MAC address at index {i}: {mac}")
-                            break
+                    # First, attempt to identify fields based on the template structure
+                    if len(entry) >= 7:  # For new template: VLAN_ID, MAC_ADDRESS, TYPE, AGE, SECURE, NTFY, PORTS
+                        vlan = entry[0]  # VLAN_ID
+                        mac = entry[1]   # MAC_ADDRESS
+                        port = entry[6]  # PORTS
                     
-                    # If no field looks like a MAC, try the fields we expect based on template
-                    if not mac and len(entry) >= 7:  # For VLAN_ID, MAC_ADDRESS, TYPE, AGE, SECURE, NTFY, PORTS
-                        mac = entry[1]  # MAC_ADDRESS is second field in new template
-                    elif not mac and len(entry) >= 2:  # For older template
-                        mac = entry[1]  # MAC field in older template
-                        
+                    # If MAC address wasn't found, try to detect it
+                    if not mac:
+                        for i, field in enumerate(entry):
+                            # MAC addresses typically contain : or . as separators
+                            if field and (':' in field or '.' in field or 
+                                         (len(field) in [12, 14, 17] and all(c in '0123456789abcdefABCDEF.:' for c in field))):
+                                mac = field
+                                logger.debug(f"Found MAC address at index {i}: {mac}")
+                                
+                                # Try to find port info in other fields
+                                for j, port_field in enumerate(entry):
+                                    if j != i and port_field and port_field.lower() not in ['dynamic', 'static', 'learned']:
+                                        # Check if field looks like a port (contains common port prefixes)
+                                        if any(prefix in port_field.lower() for prefix in ['gi', 'fa', 'eth', 'po', 'vlan', 'te', 'port']):
+                                            port = port_field
+                                            break
+                                break
+                    
                     if mac:
                         # Clean and normalize MAC address
                         mac = mac.lower()  # Convert to lowercase
                         
-                        # Add to the set
-                        mac_addresses.add(mac)
-                        logger.debug(f"Added MAC address: {mac}")
+                        # Store MAC with port info and device hostname
+                        mac_addresses[mac] = {
+                            'port': port or 'unknown',
+                            'device': hostname,
+                            'vlan': vlan or 'unknown'
+                        }
+                        logger.debug(f"Added MAC address: {mac} on port {port} of device {hostname}")
                 except Exception as e:
                     logger.error(f"Error processing MAC entry: {str(e)}, Entry: {entry}")
                     
@@ -230,8 +245,8 @@ class NetworkConnector:
     def save_mac_addresses(self, mac_addresses, filename="mac_addresses.txt"):
         """Save collected MAC addresses to a file."""
         with open(filename, 'w') as f:
-            for mac in mac_addresses:
-                f.write(f"{mac}\n")
+            for mac, info in mac_addresses.items():
+                f.write(f"{mac},{info['device']},{info['port']},{info['vlan']}\n")
         logger.info(f"Saved {len(mac_addresses)} MAC addresses to {filename}")
     
     def get_arp_table(self, connection):
@@ -324,11 +339,14 @@ class NetworkConnector:
                         
                         # Check both the raw MAC and normalized format
                         matched = False
-                        for stored_mac in mac_addresses:
+                        for stored_mac in mac_addresses.keys():
                             normalized_stored = stored_mac.replace(':', '').replace('.', '')
                             if mac_address == stored_mac or normalized_mac == normalized_stored:
-                                mac_to_ip[stored_mac] = ip_address
-                                logger.info(f"Mapped MAC {stored_mac} to IP {ip_address}")
+                                # Store the IP along with port info
+                                mac_info = mac_addresses[stored_mac].copy()
+                                mac_info['ip'] = ip_address
+                                mac_to_ip[stored_mac] = mac_info
+                                logger.info(f"Mapped MAC {stored_mac} to IP {ip_address} on port {mac_info['port']}")
                                 matched = True
                                 break
                         
